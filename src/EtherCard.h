@@ -115,6 +115,7 @@ public:
     static uint8_t dhcpip[IP_LEN]; ///< DHCP server IP address
     static uint8_t dnsip[IP_LEN];  ///< DNS server IP address
     static uint8_t hisip[IP_LEN];  ///< DNS lookup result
+    static uint8_t returned_mac[ETH_LEN]; // Returning ARP request response with MAC address - from blocking ARP request
     static uint16_t hisport;  ///< TCP port to connect to (default 80)
     static bool using_dhcp;   ///< True if using DHCP
     static bool persist_tcp_connection; ///< False to break connections on first packet received
@@ -265,6 +266,8 @@ public:
     */
     static void udpPrepare (uint16_t sport, const uint8_t *dip, uint16_t dport);
 
+    static void udpPrepare_mac (uint16_t sport, const uint8_t *dip, const uint8_t *mac, uint16_t dport);
+
     /**   @brief  Transmit UDP packet
     *     @param  len Size of payload
     */
@@ -279,6 +282,9 @@ public:
     */
     static void sendUdp (const char *data, uint8_t len, uint16_t sport,
                          const uint8_t *dip, uint16_t dport);
+
+    static void sendUdp_mac (const char *data, uint8_t len, uint16_t sport,
+                             const uint8_t *dip, const uint8_t *mac, uint16_t dport);
 
     /**   @brief  Resister the function to handle ping events
     *     @param  cb Pointer to function
@@ -460,6 +466,8 @@ public:
     *     @return <i>uint8_t</i> 0 on success
     */
     static uint8_t parseIp(uint8_t *bytestr,char *str);
+
+    void client_arp_whohas_blocking(uint8_t *ip_we_search);
 
     /**   @brief  Convert a byte array to a human readable display string
     *     @param  resultstr Pointer to a buffer to hold the resulting null terminated string

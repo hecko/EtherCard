@@ -54,6 +54,7 @@ static boolean waiting_for_dns_mac = false; //might be better to use bit flags a
 static boolean has_dns_mac = false;
 static boolean waiting_for_dest_mac = false;
 static boolean has_dest_mac = false;
+static boolean waiting_for_mac = false; // we have manually requested a arp request and now waiting for the response before doing anything else further
 static uint8_t gwmacaddr[ETH_LEN]; // Hardware (MAC) address of gateway router
 static uint8_t waitgwmac; // Bitwise flags of gateway router status - see below for states
 //Define gateway router ARP statuses
@@ -373,6 +374,30 @@ uint8_t EtherCard::ntpProcessAnswer (uint32_t *time,uint8_t dstport_l) {
     return 1;
 }
 
+void EtherCard::udpPrepare_mac (uint16_t sport, const uint8_t *dip, const uint8_t *mac, uint16_t dport) {
+    if(is_lan(myip, dip)) {            // this works because both dns mac and destinations mac are stored in same variable - destmacaddr
+        setMACandIPs(mac, dip);        // at different times. The program could have separate variable for dns mac, then here should be
+    } else {                           // checked if dip is dns ip and separately if dip is hisip and then use correct mac.
+        setMACandIPs(gwmacaddr, dip);
+    }
+    // see http://tldp.org/HOWTO/Multicast-HOWTO-2.html
+    // multicast or broadcast address, https://github.com/njh/EtherCard/issues/59
+    if ((dip[0] & 0xF0) == 0xE0 || *((unsigned long*) dip) == 0xFFFFFFFF || !memcmp(broadcastip,dip,IP_LEN))
+        EtherCard::copyMac(gPB + ETH_DST_MAC, allOnes);
+    gPB[ETH_TYPE_H_P] = ETHTYPE_IP_H_V;
+    gPB[ETH_TYPE_L_P] = ETHTYPE_IP_L_V;
+    memcpy_P(gPB + IP_P,iphdr,sizeof iphdr);
+    gPB[IP_TOTLEN_H_P] = 0;
+    gPB[IP_PROTO_P] = IP_PROTO_UDP_V;
+    gPB[UDP_DST_PORT_H_P] = (dport>>8);
+    gPB[UDP_DST_PORT_L_P] = dport;
+    gPB[UDP_SRC_PORT_H_P] = (sport>>8);
+    gPB[UDP_SRC_PORT_L_P] = sport;
+    gPB[UDP_LEN_H_P] = 0;
+    gPB[UDP_CHECKSUM_H_P] = 0;
+    gPB[UDP_CHECKSUM_L_P] = 0;
+}
+
 void EtherCard::udpPrepare (uint16_t sport, const uint8_t *dip, uint16_t dport) {
     if(is_lan(myip, dip)) {                    // this works because both dns mac and destinations mac are stored in same variable - destmacaddr
         setMACandIPs(destmacaddr, dip);        // at different times. The program could have separate variable for dns mac, then here should be
@@ -416,6 +441,15 @@ void EtherCard::sendUdp (const char *data, uint8_t datalen, uint16_t sport,
     udpTransmit(datalen);
 }
 
+void EtherCard::sendUdp_mac (const char *data, uint8_t datalen, uint16_t sport,
+                             const uint8_t *dip, const uint8_t *mac, uint16_t dport) {
+    udpPrepare_mac(sport, dip, mac, dport);
+    if (datalen>220)
+        datalen = 220;
+    memcpy(gPB + UDP_DATA_P, data, datalen);
+    udpTransmit(datalen);
+}
+
 void EtherCard::sendWol (uint8_t *wolmac) {
     setMACandIPs(allOnes, allOnes);
     gPB[ETH_TYPE_H_P] = ETHTYPE_IP_H_V;
@@ -442,8 +476,22 @@ void EtherCard::sendWol (uint8_t *wolmac) {
     packetSend(pos + 6);
 }
 
-// make a arp request
+// make an arp request
 static void client_arp_whohas(uint8_t *ip_we_search) {
+    setMACs(allOnes);
+    gPB[ETH_TYPE_H_P] = ETHTYPE_ARP_H_V;
+    gPB[ETH_TYPE_L_P] = ETHTYPE_ARP_L_V;
+    memcpy_P(gPB + ETH_ARP_P, arpreqhdr, sizeof arpreqhdr);
+    memset(gPB + ETH_ARP_DST_MAC_P, 0, ETH_LEN);
+    EtherCard::copyMac(gPB + ETH_ARP_SRC_MAC_P, EtherCard::mymac);
+    EtherCard::copyIp(gPB + ETH_ARP_DST_IP_P, ip_we_search);
+    EtherCard::copyIp(gPB + ETH_ARP_SRC_IP_P, EtherCard::myip);
+    EtherCard::packetSend(42);
+}
+
+// make an arp request
+void EtherCard::client_arp_whohas_blocking(uint8_t *ip_we_search) {
+    waiting_for_mac = true;
     setMACs(allOnes);
     gPB[ETH_TYPE_H_P] = ETHTYPE_ARP_H_V;
     gPB[ETH_TYPE_L_P] = ETHTYPE_ARP_L_V;
@@ -712,16 +760,30 @@ uint16_t EtherCard::packetLoop (uint16_t plen) {
         return 0;
     }
 
+    // Handling ARP packets here
     if (eth_type_is_arp_and_my_ip(plen))
-    {   //Service ARP request
+    {   // Send response to external ARP request
         if (gPB[ETH_ARP_OPCODE_L_P]==ETH_ARP_OPCODE_REQ_L_V)
             make_arp_answer_from_request();
+
+        // We have been waiting for ARP response and this is it
+        if (waiting_for_mac) {
+            waiting_for_mac = false;
+            EtherCard::copyMac(EtherCard::returned_mac, gPB + ETH_ARP_SRC_MAC_P);
+        }
+
+        // We have been waiting for GW ARP response and this is it
         if (waitgwmac & WGW_ACCEPT_ARP_REPLY && (gPB[ETH_ARP_OPCODE_L_P]==ETH_ARP_OPCODE_REPLY_L_V) && client_store_mac(gwip, gwmacaddr))
             waitgwmac = WGW_HAVE_GW_MAC;
+
+        // We have been waiting for DNS server ARP response and this is it
         if (!has_dns_mac && waiting_for_dns_mac && client_store_mac(dnsip, destmacaddr)) {
             has_dns_mac = true;
             waiting_for_dns_mac = false;
         }
+
+        // We have been waiting for generic ARP response and this is it
+        // We will save the received MAC address in destmacaddr variable
         if (!has_dest_mac && waiting_for_dest_mac && client_store_mac(hisip, destmacaddr)) {
             has_dest_mac = true;
             waiting_for_dest_mac = false;

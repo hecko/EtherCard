@@ -23,6 +23,7 @@ uint8_t EtherCard::gwip[IP_LEN];   // gateway
 uint8_t EtherCard::dhcpip[IP_LEN]; // dhcp server
 uint8_t EtherCard::dnsip[IP_LEN];  // dns server
 uint8_t EtherCard::hisip[IP_LEN];  // ip address of remote host
+uint8_t EtherCard::returned_mac[ETH_LEN]; // Returning ARP request response with MAC address - from blocking ARP request
 uint16_t EtherCard::hisport = HTTP_PORT; // tcp port to browse to
 bool EtherCard::using_dhcp = false;
 bool EtherCard::persist_tcp_connection = false;
